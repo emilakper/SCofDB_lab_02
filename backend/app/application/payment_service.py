@@ -1,22 +1,18 @@
 """Сервис для демонстрации конкурентных оплат.
-
 Этот модуль содержит два метода оплаты:
-1. pay_order_unsafe() - небезопасная реализация (READ COMMITTED без блокировок)
-2. pay_order_safe() - безопасная реализация (REPEATABLE READ + FOR UPDATE)
+pay_order_unsafe() - небезопасная реализация (READ COMMITTED без блокировок)
+pay_order_safe() - безопасная реализация (REPEATABLE READ + FOR UPDATE)
 """
-
 import uuid
 from typing import Optional
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.domain.exceptions import OrderAlreadyPaidError, OrderNotFoundError
 
 
 class PaymentService:
     """Сервис для обработки платежей с разными уровнями изоляции."""
-
+    
     def __init__(self, session: AsyncSession):
         self.session = session
 
@@ -58,23 +54,27 @@ class PaymentService:
             OrderNotFoundError: если заказ не найден
             OrderAlreadyPaidError: если заказ уже оплачен
         """
+        
         async with self.session.begin():
             result = await self.session.execute(
                 text("SELECT status FROM orders WHERE id = :order_id"),
                 {"order_id": order_id}
             )
-            status = result.scalar_one_or_none()
+            row = result.fetchone()
 
-            if status is None:
+            if row is None:
                 raise OrderNotFoundError(f"Order {order_id} not found")
-            if status != "created":
-                raise OrderAlreadyPaidError(order_id)
+            
+            status = row[0]
+
+            if status != 'created':
+                raise OrderAlreadyPaidError(f"Order {order_id} already paid")
 
             await self.session.execute(
-                text("UPDATE orders SET status = 'paid' WHERE id = :order_id AND status = 'created'"),
+                text("UPDATE orders SET status = 'paid' WHERE id = :order_id"),
                 {"order_id": order_id}
             )
-
+            
             await self.session.execute(
                 text("""
                     INSERT INTO order_status_history (id, order_id, status, changed_at)
@@ -82,8 +82,12 @@ class PaymentService:
                 """),
                 {"order_id": order_id}
             )
-
-        return {"status": "paid", "order_id": str(order_id)}
+        
+        return {
+            "order_id": str(order_id),
+            "status": "paid",
+            "message": "Order paid successfully (unsafe method)"
+        }
 
     async def pay_order_safe(self, order_id: uuid.UUID) -> dict:
         """
@@ -91,6 +95,35 @@ class PaymentService:
         
         Использует REPEATABLE READ + FOR UPDATE для предотвращения race condition.
         Корректно работает при конкурентных запросах.
+        
+        TODO: Реализовать метод следующим образом:
+        
+        1. Установить уровень изоляции REPEATABLE READ:
+           await self.session.execute(
+               text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+           )
+           
+        2. Заблокировать строку заказа для обновления:
+           SELECT status FROM orders WHERE id = :order_id FOR UPDATE
+           
+           ВАЖНО: FOR UPDATE гарантирует, что другие транзакции будут ЖДАТЬ
+           освобождения блокировки. Это предотвращает race condition.
+           
+        3. Проверить, что статус = 'created'
+           Если нет - выбросить OrderAlreadyPaidError
+           
+        4. Изменить статус на 'paid':
+           UPDATE orders SET status = 'paid' 
+           WHERE id = :order_id AND status = 'created'
+           
+        5. Записать изменение в историю:
+           INSERT INTO order_status_history (id, order_id, status, changed_at)
+           VALUES (gen_random_uuid(), :order_id, 'paid', NOW())
+           
+        6. Сделать commit
+        
+        ВАЖНО: Обязательно используйте FOR UPDATE!
+        ВАЖНО: Обязательно установите REPEATABLE READ!
         
         Args:
             order_id: ID заказа для оплаты
@@ -101,7 +134,7 @@ class PaymentService:
         Raises:
             OrderNotFoundError: если заказ не найден
             OrderAlreadyPaidError: если заказ уже оплачен
-        """
+        """   
         async with self.session.begin():
             await self.session.execute(
                 text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -111,15 +144,18 @@ class PaymentService:
                 text("SELECT status FROM orders WHERE id = :order_id FOR UPDATE"),
                 {"order_id": order_id}
             )
-            status = result.scalar_one_or_none()
+            row = result.fetchone()
 
-            if status is None:
+            if row is None:
                 raise OrderNotFoundError(f"Order {order_id} not found")
-            if status != "created":
-                raise OrderAlreadyPaidError(order_id)
+            
+            status = row[0]
+
+            if status != 'created':
+                raise OrderAlreadyPaidError(f"Order {order_id} already paid")
 
             await self.session.execute(
-                text("UPDATE orders SET status = 'paid' WHERE id = :order_id AND status = 'created'"),
+                text("UPDATE orders SET status = 'paid' WHERE id = :order_id"),
                 {"order_id": order_id}
             )
 
@@ -130,14 +166,25 @@ class PaymentService:
                 """),
                 {"order_id": order_id}
             )
+        
+        return {
+            "order_id": str(order_id),
+            "status": "paid",
+            "message": "Order paid successfully (safe method)"
+        }
 
-        return {"status": "paid", "order_id": str(order_id)}
-    
     async def get_payment_history(self, order_id: uuid.UUID) -> list[dict]:
         """
         Получить историю оплат для заказа.
         
         Используется для проверки, сколько раз был оплачен заказ.
+        
+        TODO: Реализовать метод:
+        
+        SELECT id, order_id, status, changed_at
+        FROM order_status_history
+        WHERE order_id = :order_id AND status = 'paid'
+        ORDER BY changed_at
         
         Args:
             order_id: ID заказа
@@ -145,6 +192,7 @@ class PaymentService:
         Returns:
             Список словарей с записями об оплате
         """
+        
         result = await self.session.execute(
             text("""
                 SELECT id, order_id, status, changed_at
@@ -154,4 +202,16 @@ class PaymentService:
             """),
             {"order_id": order_id}
         )
-        return [dict(row._mapping) for row in result]
+        
+        rows = result.fetchall()
+
+        history = []
+        for row in rows:
+            history.append({
+                "id": str(row[0]),
+                "order_id": str(row[1]),
+                "status": row[2],
+                "changed_at": row[3]
+            })
+        
+        return history
