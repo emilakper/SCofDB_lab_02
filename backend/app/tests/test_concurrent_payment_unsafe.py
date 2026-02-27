@@ -18,10 +18,6 @@ DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/marketplac
 async def test_engine():
     """
     Создать AsyncEngine для тестов.
-    TODO: Реализовать фикстуру:
-    1. Создать async engine
-    2. Yield engine
-    3. Dispose engine после всех тестов
     """
     engine = create_async_engine(
         DATABASE_URL, 
@@ -39,10 +35,6 @@ async def test_engine():
 async def db_session(test_engine):
     """
     Создать сессию БД для тестов.
-    TODO: Реализовать фикстуру:
-    1. Создать сессию через async engine
-    2. Yield сессию
-    3. Закрыть сессию после теста
     """
     async with AsyncSession(test_engine) as session:
         yield session
@@ -52,12 +44,6 @@ async def db_session(test_engine):
 async def test_order(test_engine):
     """
     Создать тестовый заказ со статусом 'created'.
-    TODO: Реализовать фикстуру:
-    1. Создать тестового пользователя
-    2. Создать тестовый заказ со статусом 'created'
-    3. Записать начальный статус в историю
-    4. Вернуть order_id
-    5. После теста - очистить данные
     """
     user_id = uuid.uuid4()
     order_id = uuid.uuid4()
@@ -117,42 +103,6 @@ async def test_concurrent_payment_unsafe_demonstrates_race_condition(db_session,
     Тест демонстрирует проблему race condition при использовании pay_order_unsafe().
     ОЖИДАЕМЫЙ РЕЗУЛЬТАТ: Тест ПРОХОДИТ, подтверждая, что заказ был оплачен дважды.
     Это показывает, что метод pay_order_unsafe() НЕ защищен от конкурентных запросов.
-
-    TODO: Реализовать тест следующим образом:
-
-    1. Создать два экземпляра PaymentService с РАЗНЫМИ сессиями
-       (это имитирует два независимых HTTP-запроса)
-       
-    2. Запустить два параллельных вызова pay_order_unsafe():
-       
-       async def payment_attempt_1():
-           service1 = PaymentService(session1)
-           return await service1.pay_order_unsafe(order_id)
-           
-       async def payment_attempt_2():
-           service2 = PaymentService(session2)
-           return await service2.pay_order_unsafe(order_id)
-           
-       results = await asyncio.gather(
-           payment_attempt_1(),
-           payment_attempt_2(),
-           return_exceptions=True
-       )
-       
-    3. Проверить историю оплат:
-       
-       service = PaymentService(session)
-       history = await service.get_payment_history(order_id)
-       
-       # ОЖИДАЕМ ДВЕ ЗАПИСИ 'paid' - это и есть проблема!
-       assert len(history) == 2, "Ожидалось 2 записи об оплате (RACE CONDITION!)"
-       
-    4. Вывести информацию о проблеме:
-       
-       print(f"⚠️ RACE CONDITION DETECTED!")
-       print(f"Order {order_id} was paid TWICE:")
-       for record in history:
-           print(f"  - {record['changed_at']}: status = {record['status']}")
     """
 
     order_id = test_order
